@@ -212,3 +212,252 @@ eax까지만 51이 되고, 메모리(전역변수)에 저장하지 못하고 스
 - Race Condition
 - Inndeterminate
 - Mutual Exclusion
+
+---
+---
+
+### Thread API
+각 부분의 개략적인것만 보고, 차후 세부 내용들은 각각 따로 다룰 것.  
+
+목차  
+1. 스레드 생성
+2. 스레드 완
+3. 락
+4. 조건변수
+5. 컴파일과 러닝
+6. 요약
+
+----
+#### 1. 스레드 생성 API
+POSIX에서 스레드 생성시.  
+> pthread_create( thread, attr, start routine, arg )
+
+의 함수형태  
+
+각 인자의 의미
+
+thread는 스레드 구조체에 대한 포인터  
+어떻게 상호작용할지 구조체가 필요함.  
+
+attr는 attribute 속성값.  
+스레드의 스택 크기, 스케쥴링 우선순위 등에 관한 것.  
+사실 `pthread_attr_init()` 로 별도 호출해야 초기화 가능.  
+다만 대개 NULL인 디폴트도 충분함.  
+
+세번째는 start_routine이라고 불리는,  
+스레드가 어떤 함수를 실행해야하는가?  C언어에서는 함수포인터라고 말한다.  
+리턴타입과,  인자는 좆대로 설정 가능함.  
+
+네번째는 스레드가 실행할 start_routine에 해당하는 함수로 전달될 인자.  
+void 포인터 왜씀?  <-- 보이드 포인터는 어떤 타입 인자든 전달 가능 + 어떤 타입으로든 반환 가능.  
+
+스레드 생성 -> 프로그램 내 기존 스레드들과 동일한 주소공간안에서, 독자적인 call stack을 갖춘 실행 주체 생성됨.  
+
+#### 2. 스레드 완성
+스레드가 완료될 때 까지 기다리는 법.  
+`pthread join()`  
+`int pthread_join(pthread_t thread, void **value_ptr);`  
+
+여기서 인자  
+첫인자 pthread_t thread  
+대기할 스레드를 명시  
+해당 변수는 ptrhead_create() 할떄, 인자로 해당 스레드 주자늠? 그때 초기화 되어서 사용이 가능해짐.  
+
+두번째 인자  void **value_ptr  
+이 join루틴은 어떤 형태로든 반환이 가능하다.  보이드 포인터로 정의되어있기 때문.   
+또한 이 함수는 전달받은 인자의 값을 변경하기 때문에, 값 자체가 아니라, 변경 가능하게 값을 가리키는 포인터를 전달해야함.  
+
+##### 추가사항  
+1) 생성 및 다루는 경우에서  
+인자없이 스레드 생성시, 인자를 NULL로 전달 가능.  
+스레드 조인시 반환값 안중요하면, NULL전달 가능.  
+아래꺼 보고 생각하면 편함 ㅇㅇ 
+```
+typedef struct { int a; int b; } myarg_t;
+typedef struct { int x; int y; } myret_t;
+
+void *mythread(void *arg) {
+  myret_t *rvals = Malloc(sizeof(myret_t));
+  rvals->x = 1;
+  rvals->y = 2;
+  return (void *) rvals;
+}
+
+int main(int argc, char *argv[]) {
+  pthread_t p;
+  myret_t *rvals;
+  myarg_t args = { 10, 20 };
+  Pthread_create(&p, NULL, mythread, &args);
+  Pthread_join(p, (void **) &rvals);
+  printf("returned %d %d\n", rvals->x, rvals->y);
+  free(rvals);
+  return 0;
+}
+```
+
+2) 단일값만 주는 경우에
+스레드 생성시 단일값만 주는경우는 struct로 패키징 할 필요없음.
+
+3) 스레드에 값을 반환시
+> never return a pointer which refers to something allocated on the thread’s call stack.
+
+절대로 "스레드의 호출 스택" "내부"를 "가리키는" "포인터"를 "반환하지 말 것"  
+아래는 위험한 예시  
+```
+void *mythread(void *arg) {
+  myarg_t *args = (myarg_t *) arg;
+  printf("%d %d\n", args->a, args->b);
+  myret_t oops; // ALLOCATED ON STACK: BAD!
+  oops.x = 1;
+  oops.y = 2;
+  return (void *) &oops;
+}
+
+```
+
+4)  예시처럼 보통 생성 직후 바로 join 안한다.
+보통 바로 기다리는거보다, 더 이상의 작업을 하려고 스레드를 만들지,
+이럴거면 걍 프로시저호출(함수호출) 때리면 되긴 함.,  
+
+5) join은 상황에 따라 쓰는것.
+멀티 스레드 웹서버 같은건, 스레드로 워커 노드같이 구성해서, 메인스레드가 끊임없이 요청받고 워커에게 전달해주는 식으로도 가능.
+이경우는 join이 필요 없겠죠?
+
+다만 또, 병렬 수행으로 처리를 한뒤, 확인을 하고 넘어가야하면,   
+join 써야겠지?  
+
+----
+
+#### 3. Lock
+생성 조인 말고도 유용한것은  
+임계영역에 상호 배제를 가능하게 해주는 lock 임
+
+```
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+```
+
+가장 간단한 예시로  
+```
+pthread_mutex_t lock;
+pthread_mutex_lock(&lock);
+x = x + 1; // or whatever your critical section is
+pthread_mutex_unlock(&lock);
+
+```
+
+해당 함수 호출시 다른 스레드가 락을 안걸었으면,  해당 스레드는 임계구역으로 진입.  
+락이 걸려 있다면, 반환되지 않고 락을 얻을떄 까지 해당 함수에서 대기  
+
+위는 문제가 2가지 존재하는 코드
+1. lock이 적절한 초기화 되지 않음
+2. lock 및 unlock 호출시, 오류코드 확인 안함.  
+
+##### 락 초기화
+`pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;`  
+혹은 런타임에서 하려면  
+```
+int rc = pthread_mutex_init(&lock, NULL);
+assert(rc == 0); // always check success!
+```
+보통 동적방식으로 사용하고,  
+인자는 lock자체 주소, 그리고 속성값인데, 보통 기본값을 쓰는 NULL을 사용.  
+
+##### 락 획득 및 해제간 오류코드 확인  
+```
+// Keeps code clean; only use if exit() OK upon failure
+void Pthread_mutex_lock(pthread_mutex_t *mutex) {
+  int rc = pthread_mutex_lock(mutex);
+  assert(rc == 0);
+}
+```
+다른 방법도 있긴한데 넘김 ㅇㅇ  
+
+
+#### 4. 조건변수
+조건변수는 스레드간 일종의 신호전달이 필요할떄 사용.  
+즉, 한 스레드가 다른 스레드가 어떤 작업을 완료한 뒤에서야 다음 단계로 넘어가는게 가능한 경우에 유용하다.   
+
+조건변수 사용 조건
+1. 관련된 lock이 존재할 것.
+2. 해당 lock의 잠금을 획득한 상태일 것.
+
+`pthread_cond_wait()`은 호출한 스레드를 sleep함.  
+다른 스레드에서 신호를 주기 전까지 잠듬.  
+다른 스레드에서 신호를 준다면 깨어남.  
+
+```
+  pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+  Pthread_mutex_lock(&lock);
+  while (ready == 0)
+  Pthread_cond_wait(&cond, &lock);
+  Pthread_mutex_unlock(&lock);
+  
+  ///위 sleep을 깨우기 위해서는 다른 스레드에서 아래의 코드가 동작해야함.  
+  Pthread_mutex_lock(&lock);
+  ready = 1;
+  Pthread_cond_signal(&cond);
+  Pthread_mutex_unlock(&lock);
+  // 단 ready 설정 및 신호를 보낼 때는 항상 "lock"을 획득한 상태여야
+  // race condition 발생을 막을 수 있음.  
+```
+> 특이점 1
+
+두함수가 인자가 다름.  
+시그널은 조건변수만 넣고, wait은 왜 조건변수와 락을 같이 넣나?  
+-> wait은 스레드를 sleep하면서 락을 자동으로 해재함.   
+-> 추가로 wait은 깨어난 뒤, 반환되기 전에 자동으로 lock을 획득함.  
+-> wait의 고정 시작에서 락 획득 시점부터, 종료단계에서 락을 해제하기까지, lock을 항상 보유하고 있음을 보장함.  
+
+> 특이점 2
+
+while문으로 검사하지? 왜냐? 사실 sleep했는데 언제 깨어날지 몰라 사실.  
+약간의 오버헤드는 발생할 수 있는데, pthread 구현에 따라서, 지혼자서 깨는 경우가 존재할 수 있음.   
+그러면? 좆된다. if문은 단한번이므로, 깨어나는 순간 스레드는 조건이 변했다고 생각하고 판단함.  
+
+따라서 "waking up"이라는것을 바라보는 시점을
+> 조건이 확실하게 변한게 맞다  
+> 보다는   
+> 조건이 변했을지도 모르는 힌트다.
+
+라고 생각할 것.  
+
+##### 주의사항: 게으름 금지
+조건변수 + 락 대신, 간단한 flag를 사용해 두 스레드간 신호를 주고받고 싶을 수 있음.  
+아래와 같음.  
+
+
+```
+아래는 대기코드르 변경
+while (ready == 0){
+  ; // spin
+}
+
+아래는 깨우는 코드를 변경
+ready = 1;
+```
+위에 처럼하면 뒤집니다. ㅈ대요.   
+
+1. 단순 스피닝은 CPU자원만 낭비하고, 생각보다 많은 경우 성능이 저하됨.
+2. 오류 발생 가능성
+   - 최근 연구는 이런 플래그 사용해서 스레드간 동기화하면, 실수하기 좋다는 것을 발견함.
+  
+따라서 그냥 조건변수 + 락 해라 ㅇㅇ.  
+왜그런지는 나중에 좀더 자세하게 다룰게 ㅇㅇ.  
+
+
+----
+
+
+#### 5 컴파일 및 실행
+이 장에 나오는 모든 코드 예제는 비교적 쉽게 실행해 볼 수 있습니다.    
+코드를 컴파일하려면 `pthread.h` 헤더 파일을 포함해야 합니다.   
+또한, 링크 단계에서 `-pthread` 플래그를 추가하여 `pthreads` 라이브러리를 명시적으로 연결(링크)해야 합니다.    
+예를 들어, 간단한 멀티스레드 프로그램을 컴파일하려면 다음과 같이 하면 됩니다.  
+prompt> gcc -o main main.c -Wall -pthread  
+`main.c`에 `pthreads` 헤더가 포함되어 있다면, 이제 동시성 프로그램을 성공적으로 컴파일한 것입니다.   
+물론, 실제로 제대로 작동할지 여부는 완전히 별개의 문제입니다.   
+
+
+
